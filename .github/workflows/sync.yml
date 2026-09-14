@@ -13,8 +13,17 @@ on:
   # COMPLETED a genuinely incremental cycle (watermark loaded from run 1,
   # only 24 new launches seen, watermark advanced to 05:48:46Z). Safe to
   # enable the real schedule now.
+  #
+  # Cadence is still ~15 minutes, but shifted off the top-of-hour/
+  # quarter-hour marks (:00/:15/:30/:45) — GitHub's own docs warn the
+  # schedule event "can be delayed during periods of high load... High
+  # load times include the start of every hour," and those exact marks
+  # are the most congested slots on the whole platform. `*/15` produced
+  # zero observed runs across two missed boundaries after being enabled;
+  # :07/:22/:37/:52 keeps the same 15-minute spacing while avoiding that
+  # congestion.
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {} # owner-controlled manual run, still available too
 
 # GitHub-side overlap guard. NOT the authoritative protection — the D1
