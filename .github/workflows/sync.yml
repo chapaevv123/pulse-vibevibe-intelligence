@@ -1,0 +1,55 @@
+name: Pulse x vibe/vibe incremental sync
+
+# Free-tier redesign: this replaces the Cloudflare Worker's Cron Trigger,
+# which cannot fit our sync's real CPU cost inside Workers Free's 10ms
+# per-invocation budget. GitHub-hosted runners have no comparable ceiling,
+# and public repos get unlimited free Actions minutes. The Worker keeps
+# serving the dashboard/read-only API (unchanged); this workflow is the
+# ONLY thing that writes to D1 now. See docs/DEPLOYMENT.md.
+#
+# NOT enabled/run remotely by this commit — see docs/DEPLOYMENT.md for the
+# exact remaining setup steps (create the scoped API token, add the repo
+# secret, then this schedule goes live on its own).
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub documents scheduled-workflow trigger times
+    # as best-effort (can be delayed under platform load) — 15 minutes
+    # gives comfortable margin against that jitter. The D1-backed lease
+    # (src/lock.js) plus the concurrency group below both still apply if a
+    # delayed run ever overlaps the next one.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {} # owner-controlled manual run, for testing later
+
+# GitHub-side overlap guard. NOT the authoritative protection — the D1
+# lease in src/lock.js is (it works regardless of which scheduler or how
+# many different callers exist). This just avoids wasting a runner on a
+# run that would immediately SKIPPED_LOCKED anyway.
+concurrency:
+  group: pulse-vibevibe-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # safety ceiling above the ~15-min in-process TIME_BUDGET_MS
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: public_vibe_demo/package-lock.json
+
+      - name: Install dependencies
+        working-directory: public_vibe_demo
+        run: npm ci
+
+      - name: Run incremental sync
+        working-directory: public_vibe_demo
+        env:
+          CF_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID }}
+          CF_D1_DATABASE_ID: ${{ vars.CF_D1_DATABASE_ID }}
+          CF_D1_API_TOKEN: ${{ secrets.CF_D1_API_TOKEN }}
+        run: node scripts/sync-cron.mjs

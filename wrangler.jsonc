@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pulse-vibevibe-intelligence",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Free-tier Worker. No secrets/vars required to run this demo — every
+  // config value it needs (chain id, token/creator addresses) is a public
+  // constant baked into src/config.js, not an environment variable.
+  "vars": {},
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pulse-vibe-demo",
+      "database_id": "9de7b31c-7c0e-4066-8720-4715ea463afd"
+    }
+  ],
+
+  // DISABLED 2026-09-14 ~04:00Z: every scheduled invocation since cron
+  // enable (10 consecutive runs, 23:30-03:50) ended stuck as RUNNING with
+  // NO terminal status ever written — not COMPLETED, not
+  // FAILED_OPERATION_TIMEOUT, not FAILED_TIME_BUDGET. None of the
+  // in-process timeout protections fired, meaning the isolate is being
+  // killed at the Cloudflare platform level before any JS catch block can
+  // run. Stall point also regressed over time (mid-enrichment -> before
+  // page 1 even finishes), suggesting a worsening condition (likely
+  // upstream throttling from repeated abandoned fetch sequences). See
+  // docs/DEPLOYMENT.md incident notes before any retry.
+  "triggers": { "crons": [] },
+
+  "observability": { "enabled": true }
+}

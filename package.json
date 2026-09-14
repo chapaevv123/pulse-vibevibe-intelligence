@@ -1,0 +1,23 @@
+{
+  "name": "pulse-vibevibe-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pulse Intelligence — public read-only launch intelligence demo for vibe/vibe (Seedify Launchpad) on Robinhood Chain Testnet. Cloudflare Worker + D1.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/",
+    "db:create": "wrangler d1 create pulse-vibe-demo",
+    "db:migrate:local": "wrangler d1 migrations apply pulse-vibe-demo --local",
+    "db:migrate:remote": "wrangler d1 migrations apply pulse-vibe-demo --remote",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

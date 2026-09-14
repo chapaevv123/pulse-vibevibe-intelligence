@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+
+# Note: this file is a reference asset only — this Worker has no static
+# assets binding configured (Free-tier Worker, no Cloudflare Pages), so it
+# is not currently served at /robots.txt. If static-asset serving is added
+# later (Workers Assets / Pages), wire this file through that binding.
