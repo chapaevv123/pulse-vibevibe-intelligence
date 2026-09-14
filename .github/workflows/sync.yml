@@ -7,23 +7,19 @@ name: Pulse x vibe/vibe incremental sync
 # serving the dashboard/read-only API (unchanged); this workflow is the
 # ONLY thing that writes to D1 now. See docs/DEPLOYMENT.md.
 on:
-  # Two clean owner-triggered manual runs are now confirmed (2026-09-14,
-  # after the D1 batching fix): run 1 COMPLETED a bounded initial backfill
-  # (watermark null -> 2026-09-14T05:44:09Z, 251 launches), run 2
-  # COMPLETED a genuinely incremental cycle (watermark loaded from run 1,
-  # only 24 new launches seen, watermark advanced to 05:48:46Z). Safe to
-  # enable the real schedule now.
-  #
-  # Cadence is still ~15 minutes, but shifted off the top-of-hour/
-  # quarter-hour marks (:00/:15/:30/:45) — GitHub's own docs warn the
-  # schedule event "can be delayed during periods of high load... High
-  # load times include the start of every hour," and those exact marks
-  # are the most congested slots on the whole platform. `*/15` produced
-  # zero observed runs across two missed boundaries after being enabled;
-  # :07/:22/:37/:52 keeps the same 15-minute spacing while avoiding that
-  # congestion.
-  schedule:
-    - cron: "7,22,37,52 * * * *"
+  # SCHEDULE TEMPORARILY DISABLED (2026-09-14) — see PULSE × VIBE/VIBE
+  # GITHUB SCHEDULER CANARY V1. Two different cron patterns (`*/15` and
+  # the shifted `7,22,37,52`) each missed two consecutive expected
+  # boundaries with zero scheduled runs ever appearing, despite verified-
+  # correct workflow config (state active, Actions enabled, correct file
+  # on main) and a clean D1 lock/sync_runs throughout. Before touching
+  # this cron pattern again, .github/workflows/scheduler-canary.yml (a
+  # workflow with NO Pulse/D1/secrets involvement at all) is used to
+  # determine whether GitHub Actions' schedule event works for this repo
+  # at all. Re-enable this schedule only after that canary is resolved —
+  # never run two schedulers at once.
+  # schedule:
+  #   - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {} # owner-controlled manual run, still available too
 
 # GitHub-side overlap guard. NOT the authoritative protection — the D1
