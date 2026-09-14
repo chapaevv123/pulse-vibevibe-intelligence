@@ -7,11 +7,15 @@ name: Pulse x vibe/vibe incremental sync
 # serving the dashboard/read-only API (unchanged); this workflow is the
 # ONLY thing that writes to D1 now. See docs/DEPLOYMENT.md.
 on:
-  # Scheduled trigger intentionally OMITTED here during initial rollout —
-  # see docs/DEPLOYMENT.md Phase 6/10. Re-added (`schedule: - cron: "*/15
-  # * * * *"`) only after two clean owner-triggered manual runs, so the
-  # very first real executions can never race a scheduler tick.
-  workflow_dispatch: {} # owner-controlled manual run
+  # Two clean owner-triggered manual runs are now confirmed (2026-09-14,
+  # after the D1 batching fix): run 1 COMPLETED a bounded initial backfill
+  # (watermark null -> 2026-09-14T05:44:09Z, 251 launches), run 2
+  # COMPLETED a genuinely incremental cycle (watermark loaded from run 1,
+  # only 24 new launches seen, watermark advanced to 05:48:46Z). Safe to
+  # enable the real schedule now.
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {} # owner-controlled manual run, still available too
 
 # GitHub-side overlap guard. NOT the authoritative protection — the D1
 # lease in src/lock.js is (it works regardless of which scheduler or how
