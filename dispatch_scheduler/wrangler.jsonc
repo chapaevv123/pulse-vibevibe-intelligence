@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pulse-vibevibe-dispatch-scheduler",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+
+  // Ultra-light dispatch-only Worker (PULSE × VIBE/VIBE CLOUDFLARE
+  // DISPATCH SCHEDULER V1, 2026-09-14). Its ENTIRE production job: every
+  // 15 minutes, POST one authenticated request to GitHub's
+  // workflow_dispatch REST API for chapaevv123/pulse-vibevibe-
+  // intelligence's sync.yml, then exit. It NEVER imports or runs Pulse
+  // sync/scoring/db logic and has NO D1 binding — GitHub Actions' own
+  // sync.yml (unchanged) remains the only thing that ever writes to D1.
+  //
+  // Exists because GitHub's native `schedule:` trigger failed a canary
+  // test: zero scheduled events across 3 cron patterns / 6 expected
+  // boundaries on 2026-09-14 (production sync.yml's */15 and shifted
+  // 7,22,37,52, plus an isolated scheduler-canary.yml workflow with the
+  // same shifted cadence — all confirmed missed via read-only GitHub
+  // inspection, with workflow config independently verified correct each
+  // time). See docs/DEPLOYMENT.md.
+  "triggers": {
+    "crons": ["7,22,37,52 * * * *"]
+  },
+
+  "observability": { "enabled": true }
+
+  // GITHUB_DISPATCH_TOKEN is a Worker SECRET (`wrangler secret put`),
+  // never a plaintext var/binding here. See docs/DEPLOYMENT.md for the
+  // exact fine-grained-token creation + secret-upload steps.
+}

@@ -4,7 +4,7 @@ Live, read-only launch intelligence for **vibe/vibe** (Seedify Launchpad) on
 **Robinhood Chain Testnet** — a public Cloudflare Worker + D1 demo built for
 the vibe/vibe Builder Season.
 
-**Demo URL:** `<TODO — filled in after deploy, see docs/DEPLOYMENT.md>`
+**Demo URL:** https://pulse-vibevibe-intelligence.sergtsopa.workers.dev
 
 ---
 
@@ -50,19 +50,27 @@ intelligence layer over the live launch feed.
 - A dedicated **PULSE INTELLIGENCE / $PULSE** panel tracking Pulse's own
   token exactly like any other launch
 - A public, filterable dashboard and a read-only JSON API
-- Runs entirely on Cloudflare's Free tier (Workers + D1 + Cron Triggers)
+- Runs entirely on free tiers (Cloudflare Workers + D1, GitHub Actions)
 
 ## Architecture
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full module map.
-Short version:
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full module map
+and the "why" behind this shape. Short version:
 
 ```
-vibe/vibe public API → Cloudflare Worker (cron sync) → D1 → dashboard + API
+Cloudflare Cron Scheduler (tiny Worker, dispatch_scheduler/)
+  → GitHub workflow_dispatch REST API
+  → GitHub Actions incremental sync (fetches vibe/vibe, scores, writes D1)
+  → Cloudflare D1
+  → read-only Cloudflare dashboard Worker (src/) — GET-only, serves / and /api/*
 ```
 
-The only write path is the scheduled sync job — there is no public
-POST/PUT/PATCH/DELETE route anywhere in this Worker.
+The scheduler Worker performs **no sync or data processing at all** — its
+only job, every ~15 minutes, is sending one authenticated HTTP request that
+tells GitHub Actions to run; GitHub Actions does 100% of the actual fetch/
+score/write work. Neither Cloudflare Worker in this repo has a
+POST/PUT/PATCH/DELETE route — the dashboard Worker is GET-only, and the
+scheduler Worker has no public HTTP route at all (`fetch()` always 404s).
 
 ## Public data sources (and only these)
 

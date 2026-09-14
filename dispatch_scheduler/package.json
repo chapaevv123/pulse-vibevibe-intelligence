@@ -1,0 +1,20 @@
+{
+  "name": "pulse-vibevibe-dispatch-scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ultra-light Cloudflare Worker: every 15 minutes, POST one authenticated request to GitHub's workflow_dispatch REST API, then exit. Runs NO Pulse sync/scoring/D1 logic itself.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
