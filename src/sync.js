@@ -340,6 +340,14 @@ async function runSyncLocked(
       }
       const items = resp?.data?.items || [];
       pagesFetched++;
+      // Rows are collected per page and written via ONE batch() round-trip
+      // each (see db.js's upsertLaunchRows/insertSnapshotRows) instead of
+      // one REST call per row — a page can hold ~100+ items, and
+      // per-row writes were a secondary contributor to the 2026-09-14
+      // FAILED_OPERATION_TIMEOUT incident (the primary one, creator
+      // aggregation, is fixed the same way).
+      const pageLaunchRows = [];
+      const pageSnapRows = [];
       for (const raw of items) {
         // Feed is newest-first (verified in vibeSource.js/db.js usage) —
         // once we reach a launch at or older than the watermark, every
@@ -353,17 +361,21 @@ async function runSyncLocked(
         launchesSeen++;
         const launchRow = db.normalizeLaunch(raw, id, VIBE_CHAIN_ID);
         if (!launchRow.token_address) continue;
-        const isNew = await d1w(db.upsertLaunch(D1, launchRow), "upsert_launch");
-        if (isNew) launchesNew++;
-        const snapRow = db.normalizeSnapshot(raw, id);
-        const wrote = await d1w(db.insertSnapshot(D1, snapRow), "insert_snapshot");
-        if (wrote) snapshotsWritten++;
+        pageLaunchRows.push(launchRow);
+        pageSnapRows.push(db.normalizeSnapshot(raw, id));
         touched.add(launchRow.token_address);
         if (launchRow.creator_address) touchedCreators.add(launchRow.creator_address);
         if (incremental && raw.createdAt && (!maxCreatedAtSeen || raw.createdAt > maxCreatedAtSeen)) {
           maxCreatedAtSeen = raw.createdAt;
         }
         if (launchRow.token_address === PULSE_TOKEN_ADDRESS) ownProjectRefreshed = true;
+      }
+      if (pageLaunchRows.length) {
+        const { newCount } = await d1heavy(db.upsertLaunchRows(D1, pageLaunchRows), "upsert_launch_rows");
+        launchesNew += newCount;
+      }
+      if (pageSnapRows.length) {
+        snapshotsWritten += await d1heavy(db.insertSnapshotRows(D1, pageSnapRows), "insert_snapshot_rows");
       }
       // Checkpoint: after each page's fetch + upserts (not just once at
       // the end) — protects a manually-widened `pages` run (e.g. a deep
@@ -424,14 +436,22 @@ async function runSyncLocked(
     // Batched reads (see the recomputeCreatorAggregates incident note in
     // db.js): touched.size can be up to ~150/sync, and 4 sequential D1
     // round-trips per token was a secondary contributor to sync duration.
-    // Writes (one INSERT per new score row) still happen per-token —
-    // scores is an append-only time series, not something a batch upsert
-    // can collapse.
+    // Writes are batched too now (insertScoreRows, one batch() call per
+    // 50-token flush) — scores is append-only (plain INSERT, no ON
+    // CONFLICT), so there's no read-before-write cost to batching it,
+    // unlike upsertLaunchRows.
     const touchedList = [...touched];
     const [launchesMap, scoreSnapshotsMap, scoreCreatorsMap] = await d1heavy(
       Promise.all([db.launchesFor(D1, touchedList), db.latestSnapshotsFor(D1, touchedList), db.creatorsFor(D1, [...touchedCreators])]),
       "batched_score_lookups"
     );
+    let pendingScoreRows = [];
+    const flushScores = async (label) => {
+      if (!pendingScoreRows.length) return;
+      scoresWritten += await d1heavy(db.insertScoreRows(D1, pendingScoreRows), "insert_score_rows");
+      pendingScoreRows = [];
+      await cp(label);
+    };
     for (const tokenAddress of touchedList) {
       const launch = launchesMap.get(tokenAddress);
       if (!launch) continue;
@@ -440,15 +460,15 @@ async function runSyncLocked(
       const { status } = classifyStatus(launch, snap);
       const flags = riskFlags(launch, snap, creator);
       const scored = computeScore(launch, snap, creator);
-      await d1w(db.insertScore(D1, tokenAddress, scored, status, flags, id), "insert_score");
-      scoresWritten++;
-      // Checkpoint: during scoring, every 50 tokens (natural batch
-      // boundary — not a timer) in case a widened touch set makes scoring
-      // itself long-running.
-      if (scoresWritten % 50 === 0) {
-        await cp(`scoring_batch_${scoresWritten}`);
+      pendingScoreRows.push({ tokenAddress, scored, status, flags, runId: id });
+      // Flush + checkpoint every 50 tokens (natural batch boundary — not a
+      // timer) in case a widened touch set makes scoring itself
+      // long-running.
+      if (pendingScoreRows.length >= 50) {
+        await flushScores(`scoring_batch_${scoresWritten + pendingScoreRows.length}`);
       }
     }
+    await flushScores("scoring_final_flush");
 
     if (includeEnrichment) {
       await beginOp("enrichment");

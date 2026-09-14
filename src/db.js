@@ -125,6 +125,71 @@ export async function upsertLaunch(db, row) {
   return true;
 }
 
+/**
+ * Batched sibling of upsertLaunch() for the sync page-fetch loop (the
+ * other proven-slow hot path from the 2026-09-14 FAILED_OPERATION_TIMEOUT
+ * incident: ~250 launches/cycle, one REST round-trip per row with no
+ * batching). Unlike upsertLaunch()'s SELECT-then-branch, this always does
+ * an unconditional INSERT ... ON CONFLICT DO UPDATE (same pattern as
+ * upsertCreatorAggregateRows) so every row can ride in one batch() call —
+ * first_seen_at is simply omitted from the UPDATE SET clause, so SQLite
+ * leaves it untouched on conflict, exactly like the old UPDATE branch did.
+ * "New" launches are counted via one batched pre-existence read
+ * (launchesFor(), already used elsewhere for scoring lookups) instead of
+ * per-row return values.
+ */
+export async function upsertLaunchRows(db, rows) {
+  const valid = rows.filter((r) => r && r.token_address);
+  if (!valid.length) return { written: 0, newCount: 0 };
+  const existing = await launchesFor(
+    db,
+    valid.map((r) => r.token_address)
+  );
+  const newCount = valid.reduce((n, r) => n + (existing.has(r.token_address) ? 0 : 1), 0);
+  const ts = nowIso();
+  const sql = `INSERT INTO launches(token_address,chain_id,launch_id,name,symbol,decimals,creator_address,
+     creator_vault_address,curve_address,quote_asset_address,created_at,description,image_uri,
+     metadata_uri,metadata_integrity,project_url,source,is_own_project,first_seen_at,updated_at,last_run_id)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(token_address) DO UPDATE SET
+       name=excluded.name,symbol=excluded.symbol,decimals=excluded.decimals,
+       creator_address=excluded.creator_address,creator_vault_address=excluded.creator_vault_address,
+       curve_address=excluded.curve_address,quote_asset_address=excluded.quote_asset_address,
+       created_at=excluded.created_at,description=excluded.description,image_uri=excluded.image_uri,
+       metadata_uri=excluded.metadata_uri,metadata_integrity=excluded.metadata_integrity,
+       project_url=excluded.project_url,source=excluded.source,is_own_project=excluded.is_own_project,
+       updated_at=excluded.updated_at,last_run_id=excluded.last_run_id`;
+  const statements = valid.map((r) =>
+    db
+      .prepare(sql)
+      .bind(
+        r.token_address,
+        r.chain_id,
+        r.launch_id,
+        r.name,
+        r.symbol,
+        r.decimals,
+        r.creator_address,
+        r.creator_vault_address,
+        r.curve_address,
+        r.quote_asset_address,
+        r.created_at,
+        r.description,
+        r.image_uri,
+        r.metadata_uri,
+        r.metadata_integrity,
+        r.project_url,
+        r.source,
+        r.is_own_project,
+        ts,
+        ts,
+        r.last_run_id
+      )
+  );
+  await runBatch(db, statements);
+  return { written: valid.length, newCount };
+}
+
 export async function insertSnapshot(db, row) {
   if (!row) return false;
   const res = await db
@@ -147,6 +212,48 @@ export async function insertSnapshot(db, row) {
   return (res.meta?.changes || 0) > 0;
 }
 
+/** Batched sibling of insertSnapshot() for the sync page-fetch loop. Same
+ * idempotent INSERT OR IGNORE as insertSnapshot(), just executed as one
+ * batch() call per page instead of one REST round-trip per row. */
+export async function insertSnapshotRows(db, rows) {
+  const valid = rows.filter(Boolean);
+  if (!valid.length) return 0;
+  const sql = `INSERT OR IGNORE INTO market_snapshots(
+     snapshot_id,token_address,observed_at,as_of_block,run_id,lifecycle,progress_bps,
+     tokens_sold_base_units,net_raised_wei,net_target_wei,last_price_wei_per_token,
+     volume_1h_wei,volume_24h_wei,price_change_1h_bps,price_change_24h_bps,
+     buy_count_1h,sell_count_1h,unique_buyers_1h,holder_count,analytics_status)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+  const statements = valid.map((row) =>
+    db
+      .prepare(sql)
+      .bind(
+        row.snapshot_id,
+        row.token_address,
+        row.observed_at,
+        row.as_of_block,
+        row.run_id,
+        row.lifecycle,
+        row.progress_bps,
+        row.tokens_sold_base_units,
+        row.net_raised_wei,
+        row.net_target_wei,
+        row.last_price_wei_per_token,
+        row.volume_1h_wei,
+        row.volume_24h_wei,
+        row.price_change_1h_bps,
+        row.price_change_24h_bps,
+        row.buy_count_1h,
+        row.sell_count_1h,
+        row.unique_buyers_1h,
+        row.holder_count,
+        row.analytics_status
+      )
+  );
+  const results = await runBatch(db, statements);
+  return results.reduce((sum, r) => sum + (r.meta?.changes || 0), 0);
+}
+
 export async function latestSnapshot(db, tokenAddress) {
   return db
     .prepare("SELECT * FROM market_snapshots WHERE token_address=? ORDER BY observed_at DESC LIMIT 1")
@@ -167,6 +274,32 @@ function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
+}
+
+/**
+ * Executes an array of already-prepared (prepare().bind()) write
+ * statements as ONE atomic batch when the D1 client supports it — both
+ * the Workers D1 binding and src/d1RestClient.js do — falling back to
+ * sequential .run() calls otherwise (e.g. simpler test mocks that only
+ * implement prepare/bind/run/all/first).
+ *
+ * INCIDENT NOTE (2026-09-14): the first real GitHub Actions run timed out
+ * inside creator aggregation because every write was one individual HTTPS
+ * round-trip over real internet latency (D1 REST API) with no batching —
+ * a phase touching ~150 rows cost ~150 sequential round-trips. Hot,
+ * write-heavy loops (creator aggregation, launch/snapshot upserts, score
+ * writes) now route through this helper instead.
+ */
+export async function runBatch(db, statements) {
+  if (!statements.length) return [];
+  if (typeof db.batch === "function" && statements.length > 1) {
+    return db.batch(statements);
+  }
+  const results = [];
+  for (const s of statements) {
+    results.push(await s.run());
+  }
+  return results;
 }
 
 // Cloudflare D1 caps bound parameters at 100/query (well below SQLite's
@@ -240,20 +373,15 @@ export async function getCreator(db, creatorAddress) {
 
 async function upsertCreatorAggregateRows(db, rows) {
   const ts = nowIso();
-  for (const r of rows) {
-    await db
-      .prepare(
-        `INSERT INTO creators(creator_address,first_observed_at,latest_observed_at,total_launches_tracked,updated_at)
-         VALUES(?,?,?,?,?)
-         ON CONFLICT(creator_address) DO UPDATE SET
-           first_observed_at=COALESCE(creators.first_observed_at, excluded.first_observed_at),
-           latest_observed_at=excluded.latest_observed_at,
-           total_launches_tracked=excluded.total_launches_tracked,
-           updated_at=excluded.updated_at`
-      )
-      .bind(r.creator_address, r.fs, r.ls, r.total, ts)
-      .run();
-  }
+  const sql = `INSERT INTO creators(creator_address,first_observed_at,latest_observed_at,total_launches_tracked,updated_at)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(creator_address) DO UPDATE SET
+       first_observed_at=COALESCE(creators.first_observed_at, excluded.first_observed_at),
+       latest_observed_at=excluded.latest_observed_at,
+       total_launches_tracked=excluded.total_launches_tracked,
+       updated_at=excluded.updated_at`;
+  const statements = rows.map((r) => db.prepare(sql).bind(r.creator_address, r.fs, r.ls, r.total, ts));
+  await runBatch(db, statements);
   return rows.length;
 }
 
@@ -366,6 +494,41 @@ export async function insertScore(db, tokenAddress, scored, status, flags, runId
       scored.thresholds_version
     )
     .run();
+}
+
+/** Batched sibling of insertScore() for the sync scoring loop. Scores are
+ * an append-only time series (plain unconditional INSERT, no ON CONFLICT
+ * needed at all), so this is a direct one-batch()-call substitute for N
+ * sequential .run() calls — no read-before-write required, unlike
+ * upsertLaunchRows(). */
+export async function insertScoreRows(db, rows) {
+  if (!rows.length) return 0;
+  const ts = nowIso();
+  const sql = `INSERT INTO scores(token_address,computed_at,run_id,status,score,earlyness_component,
+     momentum_component,activity_component,creator_component,confidence_component,flags_json,
+     breakdown_json,thresholds_version)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+  const statements = rows.map((r) =>
+    db
+      .prepare(sql)
+      .bind(
+        r.tokenAddress,
+        ts,
+        r.runId,
+        r.status,
+        r.scored.score,
+        r.scored.earlyness_component,
+        r.scored.momentum_component,
+        r.scored.activity_component,
+        r.scored.creator_component,
+        r.scored.confidence_component,
+        JSON.stringify(r.flags),
+        JSON.stringify(r.scored.breakdown),
+        r.scored.thresholds_version
+      )
+  );
+  await runBatch(db, statements);
+  return rows.length;
 }
 
 export async function latestScore(db, tokenAddress) {

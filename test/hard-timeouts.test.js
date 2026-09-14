@@ -204,7 +204,13 @@ test("3+5+6+7. a hung D1 write times out, aborts truthfully with FAILED_OPERATIO
   installFakeVibeFetch(t);
 
   const start = Date.now();
-  const result = await runSync(d1, { pages: 1, pageLimit: 1, includeEnrichment: false, d1WriteTimeoutMs: 30 });
+  // The page-fetch loop's launch upsert is now batched (upsertLaunchRows),
+  // which bundles a chunked existence read with a batched write and is
+  // therefore categorized under d1heavy (same tier as the other
+  // multi-round-trip batched lookups) rather than d1w — set both timeout
+  // tiers small so this test stays robust regardless of which tier the
+  // hang falls under.
+  const result = await runSync(d1, { pages: 1, pageLimit: 1, includeEnrichment: false, d1WriteTimeoutMs: 30, d1HeavyTimeoutMs: 30 });
   const elapsed = Date.now() - start;
 
   assert.ok(elapsed < 2000, `should abort near the 30ms D1 write timeout, took ${elapsed}ms`);
@@ -241,18 +247,26 @@ test("9. a hung terminal status write (logging the timeout itself) does not recu
   installFakeVibeFetch(t);
 
   const start = Date.now();
-  const result = await runSync(d1, { pages: 1, pageLimit: 1, includeEnrichment: false, d1WriteTimeoutMs: 30 });
+  // See the note on test 3+5+6+7 above: the hanging write now happens
+  // inside the batched, d1heavy-tier upsertLaunchRows(), so both timeout
+  // tiers need to be small for this to fail fast.
+  const result = await runSync(d1, { pages: 1, pageLimit: 1, includeEnrichment: false, d1WriteTimeoutMs: 30, d1HeavyTimeoutMs: 30 });
   const elapsed = Date.now() - start;
 
-  // Every d1w-wrapped call (including the terminal status write itself)
-  // shares the same 30ms timeout here, so total time stays small and
+  // Every timeout-wrapped call (including the terminal status write
+  // itself) shares a small timeout here, so total time stays small and
   // bounded rather than growing with each additional hung write.
   assert.ok(elapsed < 2000, `must not hang or loop — took ${elapsed}ms`);
   assert.equal(result.status, "FAILED_OPERATION_TIMEOUT");
 });
 
 test("15. checkpoint/operation progress is recorded truthfully on the run that actually stalled", async (t) => {
-  const d1 = makeSyncD1({ hangOnSqlIncludes: "FROM launches WHERE token_address IN" });
+  // Targets creatorsFor()'s SQL specifically (unique to the scoring
+  // phase's batched-lookup cluster) rather than launchesFor()'s — the
+  // page-fetch loop's upsertLaunchRows() now ALSO issues a launchesFor()
+  // read (its batched pre-existence check), so hanging on that shared SQL
+  // shape would now stall in page_fetch_loop instead of scoring.
+  const d1 = makeSyncD1({ hangOnSqlIncludes: "FROM creators WHERE creator_address IN" });
   installFakeVibeFetch(t);
 
   const result = await runSync(d1, { pages: 1, pageLimit: 1, includeEnrichment: false, d1HeavyTimeoutMs: 30 });

@@ -140,3 +140,70 @@ test("endpoint URL is correctly scoped to the given account and database", async
   await d1.prepare("SELECT 1").run();
   assert.equal(fetchImpl.calls[0].url, `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/d1/database/${DATABASE_ID}/query`);
 });
+
+// ---------------------------------------------------------------------------
+// batch() — added after the first live GitHub Actions run timed out inside
+// creator aggregation (one REST round-trip per row, no batching). These
+// prove batch() sends many statements in ONE HTTP call instead of N.
+// ---------------------------------------------------------------------------
+
+test("batch() sends multiple statements in ONE HTTP request, not one per statement", async () => {
+  const fetchImpl = makeFakeFetch(() =>
+    jsonResponse(200, {
+      success: true,
+      errors: [],
+      result: [
+        { results: [], success: true, meta: { changes: 1 } },
+        { results: [], success: true, meta: { changes: 1 } },
+        { results: [], success: true, meta: { changes: 1 } },
+      ],
+    })
+  );
+  const d1 = createD1RestClient({ accountId: ACCOUNT_ID, databaseId: DATABASE_ID, apiToken: API_TOKEN, fetchImpl });
+
+  const statements = [
+    d1.prepare("INSERT INTO creators VALUES (?)").bind("0xa"),
+    d1.prepare("INSERT INTO creators VALUES (?)").bind("0xb"),
+    d1.prepare("INSERT INTO creators VALUES (?)").bind("0xc"),
+  ];
+  const results = await d1.batch(statements);
+
+  assert.equal(fetchImpl.calls.length, 1, "3 statements must cost exactly 1 HTTP round-trip");
+  assert.equal(results.length, 3);
+  assert.deepEqual(
+    results.map((r) => r.meta.changes),
+    [1, 1, 1]
+  );
+
+  const body = JSON.parse(fetchImpl.calls[0].options.body);
+  assert.ok(Array.isArray(body.batch), "request body must use the batch field");
+  assert.equal(body.batch.length, 3);
+  assert.deepEqual(body.batch[1].params, ["0xb"]);
+});
+
+test("batch() chunks large statement sets to stay under the per-request statement cap", async () => {
+  const fetchImpl = makeFakeFetch((url, options) => {
+    const body = JSON.parse(options.body);
+    const n = body.batch.length;
+    return jsonResponse(200, {
+      success: true,
+      errors: [],
+      result: Array.from({ length: n }, () => ({ results: [], success: true, meta: { changes: 1 } })),
+    });
+  });
+  const d1 = createD1RestClient({ accountId: ACCOUNT_ID, databaseId: DATABASE_ID, apiToken: API_TOKEN, fetchImpl });
+
+  const statements = Array.from({ length: 200 }, (_, i) => d1.prepare("INSERT INTO x VALUES (?)").bind(i));
+  const results = await d1.batch(statements);
+
+  assert.equal(results.length, 200);
+  assert.ok(fetchImpl.calls.length >= 3, `200 statements at a 90-per-chunk cap should need >=3 requests, got ${fetchImpl.calls.length}`);
+});
+
+test("batch() propagates an API-level error clearly (never silently drops a failed statement)", async () => {
+  const fetchImpl = makeFakeFetch(() => jsonResponse(200, { success: false, errors: [{ message: "batch statement failed" }] }));
+  const d1 = createD1RestClient({ accountId: ACCOUNT_ID, databaseId: DATABASE_ID, apiToken: API_TOKEN, fetchImpl });
+
+  const statements = [d1.prepare("INSERT INTO x VALUES (?)").bind(1)];
+  await assert.rejects(() => d1.batch(statements), /batch statement failed/);
+});
