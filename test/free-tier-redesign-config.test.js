@@ -6,11 +6,27 @@ import path from "node:path";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
-test("17+18. GitHub Actions workflow is scheduled at */15, not */10 or */1", () => {
+test("17+18. GitHub Actions workflow never uses a */1 or */10 cron; the schedule trigger, if present, is exactly */15", () => {
+  // During initial rollout (see docs/DEPLOYMENT.md Phase 6/10) the
+  // `schedule:` trigger is deliberately OMITTED so the very first
+  // owner-triggered manual runs can never race a scheduler tick —
+  // `workflow_dispatch` alone is a valid, expected state here. Once the
+  // schedule IS added back, it must be exactly */15 — never */1, never
+  // */10.
   const yml = readFileSync(path.join(ROOT, ".github", "workflows", "sync.yml"), "utf8");
-  assert.match(yml, /cron:\s*["']?\*\/15 \* \* \* \*["']?/, "workflow must be scheduled every 15 minutes");
   assert.doesNotMatch(yml, /cron:\s*["']?\*\/1 \* \* \* \*["']?/, "must never use a 1-minute cron");
-  assert.doesNotMatch(yml, /cron:\s*["']?\*\/10 \* \* \* \*["']?/, "must use 15 minutes, not 10");
+  assert.doesNotMatch(yml, /cron:\s*["']?\*\/10 \* \* \* \*["']?/, "must use 15 minutes, not 10, if/when a schedule exists");
+  // Strip comment-only lines first — this file's own explanatory comments
+  // reference "schedule:" and "cron:" in backticks, which would otherwise
+  // false-positive as an active YAML trigger key.
+  const codeOnly = yml
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  const hasSchedule = /^\s*schedule:/m.test(codeOnly);
+  if (hasSchedule) {
+    assert.match(yml, /cron:\s*["']?\*\/15 \* \* \* \*["']?/, "an existing schedule trigger must be exactly */15");
+  }
 });
 
 test("workflow_dispatch is supported for owner-controlled manual testing", () => {
